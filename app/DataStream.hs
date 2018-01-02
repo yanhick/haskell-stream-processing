@@ -10,20 +10,23 @@ import Control.Monad (forM_)
 data DataStream a b where
   Map :: (Show a, Show b, Show c) => (a -> b) -> DataStream b c -> DataStream a c
   Filter :: (Show a, Show b) => (a -> Bool) -> DataStream a b -> DataStream a b
+  FlatMap :: (Show a, Show b, Show c) => (a -> [b]) -> DataStream b c -> DataStream a c
   Identity :: DataStream a a
 
-runDataStream :: DataStream a b -> a -> Maybe b
+runDataStream :: DataStream a b -> a -> Maybe [b]
 runDataStream (Map f cont) x =
   runDataStream cont (f x)
 runDataStream (Filter f cont) x =
   if f x
   then runDataStream cont x
   else Nothing
-runDataStream Identity x = Just x
+runDataStream (FlatMap f cont) x =
+  concat <$> traverse (runDataStream cont) (f x)
+runDataStream Identity x = Just [x]
 
 runPipeline :: (Show b) => [a] -> Pipeline a b -> Process ()
 runPipeline ds (Pipeline _ dataStream sink)= do
-  let res = catMaybes $ fmap (runDataStream dataStream) ds
+  let res = concat $ catMaybes $ fmap (runDataStream dataStream) ds
   runSink sink res
 
 runSink :: (Show a) => Sink -> [a] -> Process()

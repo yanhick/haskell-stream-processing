@@ -17,7 +17,7 @@ data StreamData = Hello Int | Goodbye String
 instance Binary StreamData where
 
 dataStream :: DataStream StreamData Int
-dataStream = Map doubleCl $ Map doubleInt $ Map doubleInt Identity
+dataStream = Map doubleCl $ Map doubleInt $ FlatMap numToZero $ Map read $ Map doubleInt Identity
 
 pipeline :: Pipeline StreamData Int
 pipeline = Pipeline (Collection [Hello 5, Goodbye "hello"]) dataStream (File "/tmp/hello")
@@ -33,6 +33,9 @@ doubleInt i = i * 2
 doubleCl :: StreamData -> Int
 doubleCl (Hello a) = a * 2
 doubleCl (Goodbye _) = 0
+
+numToZero :: Int -> [String]
+numToZero n = fmap show [0..n]
 
 remotable ['runStream']
 
