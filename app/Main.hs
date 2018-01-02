@@ -19,11 +19,18 @@ instance Binary StreamData where
 dataStream :: DataStream StreamData Int
 dataStream = Map doubleCl $ Map doubleInt $ FlatMap numToZero $ Map read $ Map doubleInt Identity
 
+source :: Source StreamData
+source = SourceFile "/tmp/example" (const $ Hello 1)
+
+sink :: Sink Int
+sink = SinkFile "/tmp/out" show
+
 pipeline :: Pipeline StreamData Int
-pipeline = Pipeline (Collection [Hello 5, Goodbye "hello"]) dataStream (File "/tmp/hello")
+pipeline = Pipeline source dataStream sink
 
 runStream' :: [StreamData] -> Process ()
-runStream' ds =
+runStream' ds = do
+ say "hello"
  runPipeline ds pipeline
 
 
@@ -50,9 +57,8 @@ main = do
   args <- getArgs
 
   case args of
-    ["master", host, port] -> do
-      backend <- initializeBackend host port myRemoteTable
-      startMaster backend (DataStream.startPipeline pipeline $(mkClosure 'runStream'))
+    ["master", host, port] ->
+      DataStream.startPipeline host port myRemoteTable pipeline $(mkClosure 'runStream')
     ["slave", host, port] -> do
       backend <- initializeBackend host port myRemoteTable
       startSlave backend

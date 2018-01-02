@@ -4,6 +4,7 @@ module DataStream where
 import Data.Binary
 import Data.Maybe
 import Data.Typeable
+import Control.Distributed.Process.Backend.SimpleLocalnet
 import Control.Distributed.Process
 import Control.Monad (forM_)
 
@@ -29,20 +30,33 @@ runPipeline ds (Pipeline _ dataStream sink)= do
   let res = concat $ catMaybes $ fmap (runDataStream dataStream) ds
   runSink sink res
 
-runSink :: (Show a) => Sink -> [a] -> Process()
+runSink :: (Show a) => Sink a -> [a] -> Process()
 runSink Log xs = say $ show xs
-runSink (File fp) xs = do
+runSink (SinkFile fp serialize) xs = do
   say $ "writing " ++ show xs ++ " to " ++ fp
-  liftIO $ mapM_ (appendFile fp . flip (++) "\n" . show) xs
+  liftIO $ mapM_ (appendFile fp . flip (++) "\n" . serialize) xs
 
-newtype Source a = Collection [a]
 
-data Sink = Log | File FilePath
+runSource :: Source a -> IO [a]
+runSource (Collection xs) = return xs
+runSource (SourceFile path deserialize) = do
+  contents <- readFile path
+  return $ deserialize <$> lines contents
 
-data Pipeline a b = Pipeline (Source a) (DataStream a b)  Sink
+data Source a = Collection [a] | SourceFile FilePath (String -> a)
 
-startPipeline :: (Binary a, Typeable a) => Pipeline a b -> ([a] -> Closure (Process ())) -> [NodeId] -> Process ()
-startPipeline (Pipeline (Collection col) _ _) cl slaves = do
-  forM_ slaves $ \slave -> spawn slave (cl col)
+data Sink a = Log | SinkFile FilePath (a -> String)
+
+data Pipeline a b = Pipeline (Source a) (DataStream a b)  (Sink b)
+
+startPipeline :: (Binary a, Typeable a, Show a) => String -> String -> RemoteTable -> Pipeline a b -> ([a] -> Closure (Process ())) -> IO ()
+startPipeline host port remoteTable (Pipeline source _ _ ) start = do
+  backend <- initializeBackend host port remoteTable
+  source' <- runSource source
+  startMaster backend (spawnSlaves source' start)
+
+spawnSlaves :: (Binary a, Typeable a, Show a) => [a] -> ([a] -> Closure (Process ())) -> [NodeId] -> Process ()
+spawnSlaves source start slaves= do
+  forM_ slaves $ \slave -> spawn slave (start source)
   _ <- expect :: Process Int
   return ()
