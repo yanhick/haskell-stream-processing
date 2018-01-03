@@ -23,7 +23,7 @@ source :: Source StreamData
 source = StdIn (Hello . read)
 
 sink :: Sink Int
-sink = SinkFile "/tmp/out" show
+sink = StdOut show
 
 pipeline :: Pipeline StreamData Int
 pipeline = Pipeline source dataStream sink

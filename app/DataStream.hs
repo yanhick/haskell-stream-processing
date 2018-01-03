@@ -32,7 +32,8 @@ runPipeline ds (Pipeline _ dataStream sink)= do
   runSink sink res
 
 runSink :: (Show a) => Sink a -> [a] -> Process ()
-runSink Log xs = say $ show xs
+runSink (Log serialize) xs = say $ show $ fmap serialize xs
+runSink (StdOut serialize) xs = liftIO $ print $ fmap serialize xs
 runSink (SinkFile fp serialize) xs = do
   say $ "writing " ++ show xs ++ " to " ++ fp
   liftIO $ mapM_ (appendFile fp . flip (++) "\n" . serialize) xs
@@ -57,7 +58,7 @@ runSource (StdIn deserialize) = do
 
 data Source a = Collection [a] | SourceFile FilePath (String -> a) | StdIn (String -> a)
 
-data Sink a = Log | SinkFile FilePath (a -> String)
+data Sink a = Log (a -> String) | SinkFile FilePath (a -> String) | StdOut (a -> String)
 
 data Pipeline a b = Pipeline (Source a) (DataStream a b)  (Sink b)
 
@@ -68,5 +69,7 @@ startPipeline host port remoteTable (Pipeline source _ _ ) start = do
   startMaster backend (spawnSlaves source' start)
 
 spawnSlaves :: (Binary a, Typeable a, Show a) => [a] -> ([a] -> Closure (Process ())) -> [NodeId] -> Process ()
-spawnSlaves source start slaves =
+spawnSlaves source start slaves = do
   forM_ (zip source (cycle slaves))$ \(d, slave) -> spawn slave (start [d])
+  _ <- expect :: Process ()
+  return ()
