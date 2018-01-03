@@ -2,6 +2,7 @@
 module DataStream where
 
 import Data.Binary
+import System.IO
 import Data.Maybe
 import Data.Typeable
 import Control.Distributed.Process.Backend.SimpleLocalnet
@@ -30,7 +31,7 @@ runPipeline ds (Pipeline _ dataStream sink)= do
   let res = concat $ catMaybes $ fmap (runDataStream dataStream) ds
   runSink sink res
 
-runSink :: (Show a) => Sink a -> [a] -> Process()
+runSink :: (Show a) => Sink a -> [a] -> Process ()
 runSink Log xs = say $ show xs
 runSink (SinkFile fp serialize) xs = do
   say $ "writing " ++ show xs ++ " to " ++ fp
@@ -42,8 +43,19 @@ runSource (Collection xs) = return xs
 runSource (SourceFile path deserialize) = do
   contents <- readFile path
   return $ deserialize <$> lines contents
+runSource (StdIn deserialize) = do
+  end <- isEOF
+  if end
+    then return []
+  else do
+    line <- getLine
+    print line
+    do 
+      lines' <- runSource (StdIn deserialize)
+      return (deserialize line : lines')
 
-data Source a = Collection [a] | SourceFile FilePath (String -> a)
+
+data Source a = Collection [a] | SourceFile FilePath (String -> a) | StdIn (String -> a)
 
 data Sink a = Log | SinkFile FilePath (a -> String)
 
@@ -56,7 +68,5 @@ startPipeline host port remoteTable (Pipeline source _ _ ) start = do
   startMaster backend (spawnSlaves source' start)
 
 spawnSlaves :: (Binary a, Typeable a, Show a) => [a] -> ([a] -> Closure (Process ())) -> [NodeId] -> Process ()
-spawnSlaves source start slaves= do
-  forM_ slaves $ \slave -> spawn slave (start source)
-  _ <- expect :: Process Int
-  return ()
+spawnSlaves source start slaves =
+  forM_ (zip source (cycle slaves))$ \(d, slave) -> spawn slave (start [d])

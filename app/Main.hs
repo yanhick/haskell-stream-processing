@@ -20,7 +20,7 @@ dataStream :: DataStream StreamData Int
 dataStream = Map doubleCl $ Map doubleInt $ FlatMap numToZero $ Map read $ Map doubleInt Identity
 
 source :: Source StreamData
-source = SourceFile "/tmp/example" (const $ Hello 1)
+source = StdIn (Hello . read)
 
 sink :: Sink Int
 sink = SinkFile "/tmp/out" show
@@ -29,8 +29,7 @@ pipeline :: Pipeline StreamData Int
 pipeline = Pipeline source dataStream sink
 
 runStream' :: [StreamData] -> Process ()
-runStream' ds = do
- say "hello"
+runStream' ds =
  runPipeline ds pipeline
 
 
