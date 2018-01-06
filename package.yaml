@@ -25,6 +25,10 @@ dependencies:
 - distributed-process-simplelocalnet
 - network-transport-tcp
 - rank1dynamic
+- conduit-combinators
+- conduit
+- conduit-extra
+- text
 - distributed-static
 - binary
 

@@ -2,11 +2,15 @@
 module DataStream where
 
 import Data.Binary
-import System.IO
+import qualified Conduit as C
+import qualified Data.Conduit.Text as TC
+import qualified Data.Conduit.List as LC
 import Data.Maybe
+import qualified Data.Text as T
 import Data.Typeable
 import Control.Distributed.Process.Backend.SimpleLocalnet
 import Control.Distributed.Process
+import Control.Distributed.Process.Node (runProcess)
 import Control.Monad (forM_)
 
 data DataStream a b where
@@ -39,37 +43,30 @@ runSink (SinkFile fp serialize) xs = do
   liftIO $ mapM_ (appendFile fp . flip (++) "\n" . serialize) xs
 
 
-runSource :: Source a -> IO [a]
-runSource (Collection xs) = return xs
-runSource (SourceFile path deserialize) = do
-  contents <- readFile path
-  return $ deserialize <$> lines contents
-runSource (StdIn deserialize) = do
-  end <- isEOF
-  if end
-    then return []
-  else do
-    line <- getLine
-    print line
-    do 
-      lines' <- runSource (StdIn deserialize)
-      return (deserialize line : lines')
+runSource :: C.MonadResource m => Source a -> C.ConduitM () a m ()
+runSource (Collection xs) = LC.sourceList xs
+runSource (SourceFile path deserialize) =
+  C.sourceFile path C..| C.decodeUtf8C C..| TC.lines C..| C.mapC deserialize
+runSource (StdIn deserialize) =
+  C.stdinC C..| C.decodeUtf8C C..| TC.lines C..| C.mapC deserialize
 
 
-data Source a = Collection [a] | SourceFile FilePath (String -> a) | StdIn (String -> a)
+data Source a = Collection [a] | SourceFile FilePath (T.Text -> a) | StdIn (T.Text -> a)
 
 data Sink a = Log (a -> String) | SinkFile FilePath (a -> String) | StdOut (a -> String)
 
 data Pipeline a b = Pipeline (Source a) (DataStream a b)  (Sink b)
 
-startPipeline :: (Binary a, Typeable a, Show a) => String -> String -> RemoteTable -> Pipeline a b -> ([a] -> Closure (Process ())) -> IO ()
-startPipeline host port remoteTable (Pipeline source _ _ ) start = do
-  backend <- initializeBackend host port remoteTable
-  source' <- runSource source
-  startMaster backend (spawnSlaves source' start)
 
-spawnSlaves :: (Binary a, Typeable a, Show a) => [a] -> ([a] -> Closure (Process ())) -> [NodeId] -> Process ()
-spawnSlaves source start slaves = do
-  forM_ (zip source (cycle slaves))$ \(d, slave) -> spawn slave (start [d])
-  _ <- expect :: Process ()
+startPipeline :: (Binary a, Typeable a, Show a) => String -> String -> RemoteTable -> Pipeline a b -> ([a] -> Closure (Process ())) -> IO ()
+startPipeline host port remoteTable (Pipeline source _ _) start = do
+  backend <- initializeBackend host port remoteTable
+  node <- newLocalNode backend
+  peers <- findPeers backend 1000000
+  runProcess node $ forM_ peers $ \peer -> spawn peer (start [])
+  _ <- C.runConduitRes
+    $ runSource source C..| C.mapMC (\a -> do
+      C.lift $ print a
+      C.lift $ runProcess node $ forM_ peers $ \slave -> spawn slave (start [a])
+    ) C..| C.sinkList
   return ()

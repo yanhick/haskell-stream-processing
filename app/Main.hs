@@ -20,7 +20,7 @@ dataStream :: DataStream StreamData Int
 dataStream = Map doubleCl $ Map doubleInt $ FlatMap numToZero $ Map read $ Map doubleInt Identity
 
 source :: Source StreamData
-source = StdIn (Hello . read)
+source = Collection [Hello 1, Hello 2, Hello 3]
 
 sink :: Sink Int
 sink = StdOut show
