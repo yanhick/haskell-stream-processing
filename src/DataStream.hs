@@ -1,7 +1,9 @@
-{-# LANGUAGE RankNTypes, GADTs #-}
+{-# LANGUAGE RankNTypes, GADTs, LambdaCase #-}
 module DataStream where
 
 import Data.Binary
+import Data.Monoid ((<>))
+import Kafka.Conduit.Source
 import qualified Conduit as C
 import qualified Data.Conduit.Text as TC
 import qualified Data.Conduit.List as LC
@@ -12,6 +14,7 @@ import Control.Distributed.Process.Backend.SimpleLocalnet
 import Control.Distributed.Process
 import Control.Distributed.Process.Node (runProcess)
 import Control.Monad (forM_)
+import qualified Data.ByteString as B
 
 data DataStream a b where
   Map :: (Show a, Show b, Show c) => (a -> b) -> DataStream b c -> DataStream a c
@@ -42,6 +45,20 @@ runSink (SinkFile fp serialize) xs = do
   say $ "writing " ++ show xs ++ " to " ++ fp
   liftIO $ mapM_ (appendFile fp . flip (++) "\n" . serialize) xs
 
+kafkaBroker :: BrokerAddress
+kafkaBroker = BrokerAddress "localhost:9092"
+
+testTopic :: TopicName
+testTopic = TopicName "test"
+
+consumerProps :: ConsumerProperties
+consumerProps = brokersList [kafkaBroker]
+  <> groupId (ConsumerGroupId "hello_group")
+  <> noAutoCommit
+
+consumerSub :: String -> Subscription
+consumerSub topicName = topics [TopicName topicName]
+  <> offsetReset Earliest
 
 runSource :: C.MonadResource m => Source a -> C.ConduitM () a m ()
 runSource (Collection xs) = LC.sourceList xs
@@ -49,9 +66,15 @@ runSource (SourceFile path deserialize) =
   C.sourceFile path C..| C.decodeUtf8C C..| TC.lines C..| C.mapC deserialize
 runSource (StdIn deserialize) =
   C.stdinC C..| C.decodeUtf8C C..| TC.lines C..| C.mapC deserialize
+runSource (SourceKafkaTopic name deserialize) =
+  kafkaSource consumerProps (consumerSub name) (Timeout 1000) C..| C.mapC (
+  \case
+    Right ConsumerRecord { crValue = Just value } -> value
+    _ -> B.empty
+  ) C..| C.mapC deserialize
 
 
-data Source a = Collection [a] | SourceFile FilePath (T.Text -> a) | StdIn (T.Text -> a)
+data Source a = Collection [a] | SourceFile FilePath (T.Text -> a) | StdIn (T.Text -> a) | SourceKafkaTopic String (B.ByteString -> a)
 
 data Sink a = Log (a -> String) | SinkFile FilePath (a -> String) | StdOut (a -> String)
 
@@ -63,7 +86,6 @@ startPipeline host port remoteTable (Pipeline source _ _) start = do
   backend <- initializeBackend host port remoteTable
   node <- newLocalNode backend
   peers <- findPeers backend 1000000
-  runProcess node $ forM_ peers $ \peer -> spawn peer (start [])
   _ <- C.runConduitRes
     $ runSource source C..| C.mapMC (\a -> do
       C.lift $ print a

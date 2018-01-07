@@ -31,6 +31,9 @@ dependencies:
 - text
 - distributed-static
 - binary
+- bytestring
+- hw-kafka-client
+- hw-kafka-conduit
 
 library:
   source-dirs: src

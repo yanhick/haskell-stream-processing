@@ -21,6 +21,13 @@ ghc-options:
     "$targets": -Werror
     "$everything": -O2
 
+extra-deps:
+    - hw-kafka-client-2.3.0
+    - hw-kafka-conduit-2.0.0
+extra-include-dirs:
+    - /usr/local/include
+extra-lib-dirs:
+    - /usr/local/lib
 # User packages to be built.
 # Various formats can be used as shown in the example below.
 #
@@ -39,7 +46,7 @@ ghc-options:
 # A package marked 'extra-dep: true' will only be built if demanded by a
 # non-dependency (i.e. a user package), and its test suites and benchmarks
 # will not be run. This is useful for tweaking upstream packages.
-packages:
+# packages:
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)
 

@@ -16,16 +16,17 @@ data StreamData = Hello Int | Goodbye String
 
 instance Binary StreamData where
 
-dataStream :: DataStream StreamData Int
-dataStream = Map doubleCl $ Map doubleInt $ FlatMap numToZero $ Map read $ Map doubleInt Identity
+dataStream :: DataStream StreamData String
+{-dataStream = Map doubleCl $ Map doubleInt $ FlatMap numToZero $ Map read $ Map doubleInt Identity-}
+dataStream = Map show $ Map ("message : " ++) Identity
 
 source :: Source StreamData
-source = Collection [Hello 1, Hello 2, Hello 3]
+source = SourceKafkaTopic "test" (Goodbye . show)
 
-sink :: Sink Int
+sink :: Sink String
 sink = StdOut show
 
-pipeline :: Pipeline StreamData Int
+pipeline :: Pipeline StreamData String
 pipeline = Pipeline source dataStream sink
 
 runStream' :: [StreamData] -> Process ()
