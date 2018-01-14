@@ -63,7 +63,7 @@ data Source a
   | SourceFile FilePath
                (T.Text -> a)
   | StdIn (T.Text -> a)
-  | SourceKafkaTopic String
+  | SourceKafkaTopic KafkaConsumerConfig
                      (LB.ByteString -> a)
 
 data Sink a
@@ -75,6 +75,13 @@ data Pipeline a b =
   Pipeline (Source a)
            (DataStream a b)
            (Sink b)
+
+data KafkaConsumerConfig = KafkaConsumerConfig
+  { topicName     :: String
+  , brokerHost    :: String
+  , brokerPort    :: Int
+  , consumerGroup :: String
+  }
 
 runKeyedDataStream :: KeyedDataStream a b -> a -> Maybe [b]
 runKeyedDataStream _ _ = Nothing
@@ -151,16 +158,16 @@ runJobManager backend _ start = do
   let peers = delete (localNodeId node) nodes
   runProcess node $ forM_ peers $ \peer -> spawn peer (start peers)
 
-kafkaBroker :: BrokerAddress
-kafkaBroker = BrokerAddress "localhost:9092"
+kafkaBroker :: String -> Int -> BrokerAddress
+kafkaBroker host port = BrokerAddress $ host ++ ":" ++ show port
 
-consumerProps :: ConsumerProperties
-consumerProps =
-  brokersList [kafkaBroker] <> groupId (ConsumerGroupId "hello_group2") <>
+consumerProps :: BrokerAddress -> String -> ConsumerProperties
+consumerProps kafkaBroker' consumerGroup' =
+  brokersList [kafkaBroker'] <> groupId (ConsumerGroupId consumerGroup') <>
   noAutoCommit
 
 consumerSub :: String -> Subscription
-consumerSub topicName = topics [TopicName topicName] <> offsetReset Earliest
+consumerSub topicName' = topics [TopicName topicName'] <> offsetReset Earliest
 
 runSink :: C.MonadResource m => Sink a -> C.ConduitM a c m ()
 runSink (SinkFile path serialize) = C.mapC serialize C..| C.sinkFile path
@@ -172,8 +179,15 @@ runSource (SourceFile path deserialize) =
   C.sourceFile path C..| C.decodeUtf8C C..| TC.lines C..| C.mapC deserialize
 runSource (StdIn deserialize) =
   C.stdinC C..| C.decodeUtf8C C..| TC.lines C..| C.mapC deserialize
-runSource (SourceKafkaTopic name deserialize) =
-  kafkaSource consumerProps (consumerSub name) (Timeout 1000) C..|
+runSource (SourceKafkaTopic KafkaConsumerConfig { topicName = topicName'
+                                                , brokerHost = brokerHost'
+                                                , brokerPort = brokerPort'
+                                                , consumerGroup = consumerGroup'
+                                                } deserialize) =
+  kafkaSource
+    (consumerProps (kafkaBroker brokerHost' brokerPort') consumerGroup')
+    (consumerSub topicName')
+    (Timeout 1000) C..|
   C.mapC
     (\case
        Right ConsumerRecord {crValue = Just value} -> value

@@ -40,8 +40,17 @@ iToO (Goodbye s) = Goodbye' s
 dataStream :: DataStream StreamData OutputStreamData
 dataStream = Map iToO Identity
 
+kafkaConsumerConfig :: KafkaConsumerConfig
+kafkaConsumerConfig =
+  KafkaConsumerConfig
+  { topicName = "test"
+  , brokerHost = "localhost"
+  , brokerPort = 9092
+  , consumerGroup = "test_group"
+  }
+
 source :: Source StreamData
-source = SourceKafkaTopic "test" (Goodbye . show)
+source = SourceKafkaTopic kafkaConsumerConfig (Goodbye . show)
 
 sink :: Sink OutputStreamData
 sink = StdOut $ B.concat . BL.toChunks . encode
