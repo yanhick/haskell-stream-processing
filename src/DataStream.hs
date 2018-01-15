@@ -113,7 +113,7 @@ runTask _ (PipelineInternal source dataStream sink) = do
   _ <-
     liftIO $
     C.runConduitRes $
-    runSource source C..| C.mapC encode C..| C.iterMC (C.lift . print) C..|
+    runSource source C..| C.mapC encode C..|
     C.concatMapC (runDataStreamInternal dataStream) C..|
     C.concatMapC id C..|
     C.mapC decode C..|
