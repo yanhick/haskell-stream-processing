@@ -35,6 +35,7 @@ dependencies:
 - hw-kafka-client
 - hw-kafka-conduit
 - hashable
+- containers
 
 library:
   source-dirs: src

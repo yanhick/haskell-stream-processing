@@ -1,26 +1,27 @@
-{-# LANGUAGE GADTs      #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GADTs         #-}
+{-# LANGUAGE LambdaCase    #-}
+{-# LANGUAGE RankNTypes    #-}
 
 module DataStream where
 
-import qualified Conduit                                            as C
 import           Control.Distributed.Process
 import           Control.Distributed.Process.Backend.SimpleLocalnet
 import           Control.Distributed.Process.Node                   (localNodeId,
                                                                      runProcess)
 import           Control.Monad                                      (forM,
-                                                                     forM_)
+                                                                     forM_,
+                                                                     forever)
 import           Data.Binary
 import qualified Data.ByteString                                    as B
 import qualified Data.ByteString.Lazy                               as LB
-import qualified Data.Conduit.List                                  as LC
-import qualified Data.Conduit.Text                                  as TC
 import           Data.Hashable
 import           Data.List
+import qualified Data.Map                                           as MapContainer
 import           Data.Monoid                                        ((<>))
 import qualified Data.Text                                          as T
 import           Data.Typeable
+import           GHC.Generics
 import           Kafka.Conduit.Source
 
 data DataStream a b where
@@ -106,46 +107,6 @@ getPlan (FlatMap f cont) =
   FlatMapInternal (pure . fmap encode . f . decode) : getPlan cont
 getPlan Identity = []
 
-runTask ::
-     (Binary a, Binary b) => [NodeId] -> PipelineInternal a b -> Process ()
-runTask _ (PipelineInternal source dataStream sink) = do
-  liftIO $ print "start task"
-  _ <-
-    liftIO $
-    C.runConduitRes $
-    runSource source C..| C.mapC encode C..|
-    C.concatMapC (runDataStreamInternal dataStream) C..|
-    C.concatMapC id C..|
-    C.mapC decode C..|
-    runSink sink
-  return ()
-
-type Payload = (Int, LB.ByteString)
-
-receiveTaskMessage :: [(Int, ProcessId)] -> Message -> Process ()
-receiveTaskMessage nodes msg = do
-  Just (taskId, payload) <- unwrapMessage msg :: Process (Maybe Payload)
-  case filter ((==) taskId . fst) nodes of
-    [(_, pid)] -> send pid payload
-    _          -> return ()
-
-runTaskManager ::
-     (Binary a, Typeable a, Show b, Binary b)
-  => [NodeId]
-  -> Pipeline a b
-  -> Process ()
-runTaskManager peers (Pipeline source dataStream sink) = do
-  liftIO $ print "start task manager"
-  let plans = zip [0 ..] (getPlan dataStream)
-  nodes <-
-    forM plans $ \(operatorId, plan) -> do
-      processId <-
-        spawnLocal $ runTask peers (PipelineInternal source plan sink)
-      return (operatorId, processId)
-  mypid <- getSelfPid
-  send mypid (0 :: Int, encode "hello yall")
-  receiveWait [matchAny $ receiveTaskMessage nodes]
-
 runJobManager ::
      (Binary a, Typeable a, Show a)
   => Backend
@@ -169,28 +130,121 @@ consumerProps kafkaBroker' consumerGroup' =
 consumerSub :: String -> Subscription
 consumerSub topicName' = topics [TopicName topicName'] <> offsetReset Earliest
 
-runSink :: C.MonadResource m => Sink a -> C.ConduitM a c m ()
-runSink (SinkFile path serialize) = C.mapC serialize C..| C.sinkFile path
-runSink (StdOut serialize)        = C.mapC serialize C..| C.printC
+data TaskManagerInfo =
+  TaskManagerInfo ProcessId
+                  Int
+  deriving (Generic, Show)
 
-runSource :: C.MonadResource m => Source a -> C.ConduitM () a m ()
-runSource (Collection xs) = LC.sourceList xs
-runSource (SourceFile path deserialize) =
-  C.sourceFile path C..| C.decodeUtf8C C..| TC.lines C..| C.mapC deserialize
-runSource (StdIn deserialize) =
-  C.stdinC C..| C.decodeUtf8C C..| TC.lines C..| C.mapC deserialize
-runSource (SourceKafkaTopic KafkaConsumerConfig { topicName = topicName'
-                                                , brokerHost = brokerHost'
-                                                , brokerPort = brokerPort'
-                                                , consumerGroup = consumerGroup'
-                                                } deserialize) =
-  kafkaSource
-    (consumerProps (kafkaBroker brokerHost' brokerPort') consumerGroup')
-    (consumerSub topicName')
-    (Timeout 1000) C..|
-  C.mapC
-    (\case
-       Right ConsumerRecord {crValue = Just value} -> value
-       _ -> B.empty) C..|
-  C.mapC LB.fromStrict C..|
-  C.mapC deserialize
+instance Binary TaskManagerInfo
+
+startTaskManager' :: Process ()
+startTaskManager' = do
+  (Just jmid) <- whereis "job-manager"
+  pid <- getSelfPid
+  send jmid (TaskManagerInfo pid 10)
+
+type ProcessIdMap = MapContainer.Map Int [ProcessId]
+
+data TaskManagerRunPlan =
+  TaskManagerRunPlan [Int]
+                     [(Int, [ProcessId])]
+
+newtype TaskId =
+  TaskId Int
+
+runTaskId :: TaskId -> Int
+runTaskId (TaskId i) = i
+
+type IndexedPlan = [(Int, DataStreamInternal)]
+
+getIndexedPlan :: DataStream a b -> IndexedPlan
+getIndexedPlan ds = zip [1 ..] (getPlan ds)
+
+getMergedIndexedPlan :: IndexedPlan -> [Int] -> IndexedPlan
+getMergedIndexedPlan indexedPlan ids =
+  filter (\(operatorId, _) -> operatorId `elem` ids) indexedPlan
+
+getMergedProcessIdMap ::
+     [(Int, [ProcessId])] -> [(Int, [ProcessId])] -> ProcessIdMap
+getMergedProcessIdMap local remote =
+  MapContainer.fromListWith (++) (local ++ remote)
+
+runTaskManager :: Binary a => TaskManagerRunPlan -> Pipeline a b -> Process ()
+runTaskManager (TaskManagerRunPlan ids processIds) (Pipeline source ds sink) = do
+  let plans = getMergedIndexedPlan (getIndexedPlan ds) ids
+  communicationManagerPid <- spawnLocal runCommunicationManager
+  nodes <-
+    forM plans $ \(operatorId, ds') -> do
+      processId <-
+        spawnLocal $
+        runTransformTask (TaskId operatorId) communicationManagerPid ds'
+      return (operatorId, [processId])
+  sourceNode <-
+    spawnLocal $ runSourceTask (TaskId 0) communicationManagerPid source
+  sinkNode <- spawnLocal $ runSinkTask sink
+  let sinkNodeIndex = length (getIndexedPlan ds) + 1
+  let allProcessIds =
+        getMergedProcessIdMap
+          ((0, [sourceNode]) : (sinkNodeIndex, [sinkNode]) : nodes)
+          processIds
+  send communicationManagerPid allProcessIds
+
+runCommunicationManager :: Process ()
+runCommunicationManager = do
+  allProcessIds <- expect :: Process ProcessIdMap
+  forever $ do
+    (operatorId, value) <- expect :: Process (Int, LB.ByteString)
+    let nextOperator = MapContainer.lookup (operatorId + 1) allProcessIds
+    case nextOperator of
+      (Just (x:_)) -> send x value
+      _            -> return ()
+
+runTransformTask :: TaskId -> ProcessId -> DataStreamInternal -> Process ()
+runTransformTask taskId pid ds =
+  forever $ do
+    value <- expect :: Process LB.ByteString
+    let res = runDataStreamInternal ds value
+    case res of
+      Just res' -> forM_ res' (\res'' -> send pid (runTaskId taskId, res''))
+      _         -> return ()
+
+runSinkTask :: Sink a -> Process ()
+runSinkTask (SinkFile path _) =
+  forever $ do
+    value <- expect :: Process LB.ByteString
+    liftIO $ appendFile path (show value)
+runSinkTask (StdOut _) =
+  forever $ do
+    value <- expect :: Process LB.ByteString
+    liftIO $ print value
+
+runSourceTask :: (Binary a) => TaskId -> ProcessId -> Source a -> Process ()
+runSourceTask taskId pid (Collection xs) =
+  forM_ xs (\x -> send pid (runTaskId taskId, encode x))
+runSourceTask taskId pid (SourceFile path _) = do
+  lines' <- liftIO $ fmap lines (readFile path)
+  forM_ lines' (\line -> send pid (runTaskId taskId, line))
+runSourceTask taskId pid (StdIn _) =
+  forever $ do
+    line <- liftIO getLine
+    send pid (runTaskId taskId, line)
+runSourceTask taskId pid (SourceKafkaTopic KafkaConsumerConfig { topicName = topicName'
+                                                               , brokerHost = brokerHost'
+                                                               , brokerPort = brokerPort'
+                                                               , consumerGroup = consumerGroup'
+                                                               } _) = do
+  consumer <-
+    liftIO $
+    newConsumer
+      (consumerProps (kafkaBroker brokerHost' brokerPort') consumerGroup')
+      (consumerSub topicName')
+  case consumer of
+    Left _ -> return ()
+    Right consumer' ->
+      forever $ do
+        value <- pollMessage consumer' (Timeout 1000)
+        let value'' =
+              case value of
+                Right ConsumerRecord {crValue = Just value'} -> value'
+                _                                            -> B.empty
+        send pid (runTaskId taskId, encode value'')

@@ -50,7 +50,7 @@ kafkaConsumerConfig =
   }
 
 source :: Source StreamData
-source = SourceKafkaTopic kafkaConsumerConfig (Goodbye . show)
+source = SourceKafkaTopic kafkaConsumerConfig decode
 
 sink :: Sink OutputStreamData
 sink = StdOut $ B.concat . BL.toChunks . encode
@@ -59,7 +59,7 @@ pipeline :: Pipeline StreamData OutputStreamData
 pipeline = Pipeline source dataStream sink
 
 startTaskManager :: [NodeId] -> Process ()
-startTaskManager peers = runTaskManager peers pipeline
+startTaskManager _ = runTaskManager (TaskManagerRunPlan [1] []) pipeline
 
 doubleInt :: Int -> Int
 doubleInt i = i * 2
