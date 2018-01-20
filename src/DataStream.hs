@@ -175,15 +175,17 @@ getMergedProcessIdMap local remote =
 runTaskManager :: Binary a => TaskManagerRunPlan -> Pipeline a b -> Process ()
 runTaskManager (TaskManagerRunPlan ids processIds) (Pipeline source ds sink) = do
   let plans = getMergedIndexedPlan (getIndexedPlan ds) ids
-  communicationManagerPid <- spawnLocal runCommunicationManager
+  selfPid <- getSelfPid
+  communicationManagerPid <- spawnLocal $ runCommunicationManager selfPid
+  sendPort <- expect :: Process CommunicationManagerPort
   nodes <-
     forM plans $ \(operatorId, ds') -> do
       processId <-
         spawnLocal $
-        runTransformTask (TaskId operatorId) communicationManagerPid ds'
+        runTransformTask (TaskId operatorId) sendPort ds'
       return (operatorId, [processId])
   sourceNode <-
-    spawnLocal $ runSourceTask (TaskId 0) communicationManagerPid source
+    spawnLocal $ runSourceTask (TaskId 0) sendPort source
   sinkNode <- spawnLocal $ runSinkTask sink
   let sinkNodeIndex = length (getIndexedPlan ds) + 1
   let allProcessIds =
@@ -192,11 +194,13 @@ runTaskManager (TaskManagerRunPlan ids processIds) (Pipeline source ds sink) = d
           processIds
   send communicationManagerPid allProcessIds
 
-runCommunicationManager :: Process ()
-runCommunicationManager = do
+runCommunicationManager :: ProcessId -> Process ()
+runCommunicationManager pid = do
+  (sendPort, receivePort) <- newChan :: Process (SendPort CommunicationManagerMessage, ReceivePort CommunicationManagerMessage)
+  send pid sendPort
   allProcessIds <- expect :: Process ProcessIdMap
   forever $ do
-    msg <- expect :: Process CommunicationManagerMessage
+    msg <- receiveChan receivePort
     case msg of
       TaskResult (TaskId operatorId) value -> do
         let nextOperator = MapContainer.lookup (operatorId + 1) allProcessIds
@@ -229,13 +233,13 @@ runPartitionTask taskId pid f =
     let decoded = decode value
     send pid (PartitionResult taskId (ParitionBucket (f decoded)) value)
 
-runTransformTask :: TaskId -> ProcessId -> DataStreamInternal -> Process ()
-runTransformTask taskId pid ds =
+runTransformTask :: TaskId -> CommunicationManagerPort -> DataStreamInternal -> Process ()
+runTransformTask taskId sendPort ds =
   forever $ do
     (IntermediateResult value) <- expect :: Process IntermediateResult
     let res = runDataStreamInternal ds value
     case res of
-      Just res' -> forM_ res' (send pid . TaskResult taskId)
+      Just res' -> forM_ res' (sendChan sendPort . TaskResult taskId)
       _         -> return ()
 
 runSinkTask :: Sink a -> Process ()
@@ -248,17 +252,17 @@ runSinkTask (StdOut _) =
     (IntermediateResult value) <- expect :: Process IntermediateResult
     liftIO $ print value
 
-runSourceTask :: (Binary a) => TaskId -> ProcessId -> Source a -> Process ()
-runSourceTask taskId pid (Collection xs) =
-  forM_ xs (send pid . TaskResult taskId . encode)
-runSourceTask taskId pid (SourceFile path _) = do
+runSourceTask :: (Binary a) => TaskId -> CommunicationManagerPort -> Source a -> Process ()
+runSourceTask taskId sendPort (Collection xs) =
+  forM_ xs (sendChan sendPort . TaskResult taskId . encode)
+runSourceTask taskId sendPort (SourceFile path _) = do
   lines' <- liftIO $ fmap lines (readFile path)
-  forM_ lines' (send pid . TaskResult taskId . encode)
-runSourceTask taskId pid (StdIn _) =
+  forM_ lines' (sendChan sendPort . TaskResult taskId . encode)
+runSourceTask taskId sendPort (StdIn _) =
   forever $ do
     line <- liftIO getLine
-    send pid $ TaskResult taskId (encode line)
-runSourceTask taskId pid (SourceKafkaTopic KafkaConsumerConfig { topicName = topicName'
+    sendChan sendPort $ TaskResult taskId (encode line)
+runSourceTask taskId sendPort (SourceKafkaTopic KafkaConsumerConfig { topicName = topicName'
                                                                , brokerHost = brokerHost'
                                                                , brokerPort = brokerPort'
                                                                , consumerGroup = consumerGroup'
@@ -277,4 +281,4 @@ runSourceTask taskId pid (SourceKafkaTopic KafkaConsumerConfig { topicName = top
               case value of
                 Right ConsumerRecord {crValue = Just value'} -> value'
                 _                                            -> B.empty
-        send pid $ TaskResult taskId (encode value'')
+        sendChan sendPort $ TaskResult taskId (encode value'')
