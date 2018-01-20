@@ -151,6 +151,9 @@ data TaskManagerRunPlan =
 
 newtype TaskId =
   TaskId Int
+  deriving (Generic)
+
+instance Binary TaskId
 
 runTaskId :: TaskId -> Int
 runTaskId (TaskId i) = i
@@ -193,41 +196,68 @@ runCommunicationManager :: Process ()
 runCommunicationManager = do
   allProcessIds <- expect :: Process ProcessIdMap
   forever $ do
-    (operatorId, value) <- expect :: Process (Int, LB.ByteString)
-    let nextOperator = MapContainer.lookup (operatorId + 1) allProcessIds
-    case nextOperator of
-      (Just (x:_)) -> send x value
-      _            -> return ()
+    msg <- expect :: Process CommunicationManagerMessage
+    case msg of
+      TaskResult (TaskId operatorId) value -> do
+        let nextOperator = MapContainer.lookup (operatorId + 1) allProcessIds
+        case nextOperator of
+          (Just (x:_)) -> send x (IntermediateResult value)
+          _            -> return ()
+      PartitionResult{}  -> return ()
+
+newtype PartitionBucket = ParitionBucket Int
+  deriving (Generic)
+
+instance Binary PartitionBucket where
+
+data CommunicationManagerMessage = TaskResult TaskId LB.ByteString | PartitionResult TaskId PartitionBucket LB.ByteString
+  deriving (Generic)
+
+instance Binary CommunicationManagerMessage where
+
+type CommunicationManagerPort = SendPort CommunicationManagerMessage
+
+newtype IntermediateResult = IntermediateResult LB.ByteString
+  deriving (Generic)
+
+instance Binary IntermediateResult where
+
+runPartitionTask :: Binary a => TaskId -> ProcessId -> (a ->  Int) -> Process ()
+runPartitionTask taskId pid f =
+  forever $ do
+    (IntermediateResult value) <- expect :: Process IntermediateResult
+    let decoded = decode value
+    send pid (PartitionResult taskId (ParitionBucket (f decoded)) value)
 
 runTransformTask :: TaskId -> ProcessId -> DataStreamInternal -> Process ()
 runTransformTask taskId pid ds =
   forever $ do
-    value <- expect :: Process LB.ByteString
+    (IntermediateResult value) <- expect :: Process IntermediateResult
     let res = runDataStreamInternal ds value
     case res of
-      Just res' -> forM_ res' (\res'' -> send pid (runTaskId taskId, res''))
+      Just res' -> forM_ res' (send pid . TaskResult taskId)
       _         -> return ()
 
 runSinkTask :: Sink a -> Process ()
 runSinkTask (SinkFile path _) =
   forever $ do
-    value <- expect :: Process LB.ByteString
+    (IntermediateResult value) <- expect :: Process IntermediateResult
     liftIO $ appendFile path (show value)
 runSinkTask (StdOut _) =
   forever $ do
-    value <- expect :: Process LB.ByteString
+    (IntermediateResult value) <- expect :: Process IntermediateResult
     liftIO $ print value
 
 runSourceTask :: (Binary a) => TaskId -> ProcessId -> Source a -> Process ()
 runSourceTask taskId pid (Collection xs) =
-  forM_ xs (\x -> send pid (runTaskId taskId, encode x))
+  forM_ xs (send pid . TaskResult taskId . encode)
 runSourceTask taskId pid (SourceFile path _) = do
   lines' <- liftIO $ fmap lines (readFile path)
-  forM_ lines' (\line -> send pid (runTaskId taskId, line))
+  forM_ lines' (send pid . TaskResult taskId . encode)
 runSourceTask taskId pid (StdIn _) =
   forever $ do
     line <- liftIO getLine
-    send pid (runTaskId taskId, line)
+    send pid $ TaskResult taskId (encode line)
 runSourceTask taskId pid (SourceKafkaTopic KafkaConsumerConfig { topicName = topicName'
                                                                , brokerHost = brokerHost'
                                                                , brokerPort = brokerPort'
@@ -247,4 +277,4 @@ runSourceTask taskId pid (SourceKafkaTopic KafkaConsumerConfig { topicName = top
               case value of
                 Right ConsumerRecord {crValue = Just value'} -> value'
                 _                                            -> B.empty
-        send pid (runTaskId taskId, encode value'')
+        send pid $ TaskResult taskId (encode value'')
