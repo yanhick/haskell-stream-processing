@@ -21,6 +21,7 @@ import qualified Data.Map                                           as MapContai
 import           Data.Monoid                                        ((<>))
 import qualified Data.Text                                          as T
 import           Data.Typeable
+import Data.IORef
 import           GHC.Generics
 import           Kafka.Conduit.Source
 
@@ -40,6 +41,17 @@ data DataStream a b where
     => (a -> [b])
     -> DataStream b c
     -> DataStream a c
+  Partition
+    :: (Show a, Show b, Binary a, Binary b)
+    => (a -> Int)
+    -> DataStream a b
+    -> DataStream a b
+  Fold
+    :: (Show a, Show b, Binary a, Binary b)
+    => (a -> b -> a)
+    -> a
+    -> DataStream a b
+    -> DataStream a b
   Identity :: Binary a => DataStream a a
 
 data DataStreamInternal
@@ -50,9 +62,10 @@ data DataStreamInternal
 data KeyedDataStream a b where
   KeyBy :: Hashable c => (a -> c) -> DataStream a b -> KeyedDataStream a b
 
-data DataStreamOperation a b
-  = Keyed (KeyedDataStream a b)
-  | NonKeyed (DataStream a b)
+data DataStreamOperationInternal
+  = DSInternal DataStreamInternal
+  | PartitionInternal (LB.ByteString -> Int)
+  | FoldInternal ((LB.ByteString, LB.ByteString) -> LB.ByteString) LB.ByteString
 
 data PipelineInternal a b =
   PipelineInternal (Source a)
@@ -67,10 +80,9 @@ data Source a
   | SourceKafkaTopic KafkaConsumerConfig
                      (LB.ByteString -> a)
 
-data Sink a
-  = SinkFile FilePath
-             (a -> B.ByteString)
-  | StdOut (a -> B.ByteString)
+data Sink a where
+  SinkFile :: Binary a => FilePath -> (a -> B.ByteString) -> Sink a
+  StdOut :: Binary a => (a -> B.ByteString) -> Sink a
 
 data Pipeline a b =
   Pipeline (Source a)
@@ -96,16 +108,15 @@ runDataStreamInternal (FilterInternal f) x =
     else Nothing
 runDataStreamInternal (FlatMapInternal f) x = f x
 
-runDataStreamEncoded ::
-     DataStreamInternal -> LB.ByteString -> Maybe [LB.ByteString]
-runDataStreamEncoded = runDataStreamInternal
-
-getPlan :: DataStream a b -> [DataStreamInternal]
-getPlan (Map f cont) = MapInternal (encode . f . decode) : getPlan cont
-getPlan (Filter f cont) = FilterInternal (f . decode) : getPlan cont
+getPlan :: DataStream a b -> [DataStreamOperationInternal]
+getPlan (Map f cont) = (DSInternal $ MapInternal (encode . f . decode)) : getPlan cont
+getPlan (Filter f cont) = (DSInternal $ FilterInternal (f . decode)) : getPlan cont
 getPlan (FlatMap f cont) =
-  FlatMapInternal (pure . fmap encode . f . decode) : getPlan cont
+  (DSInternal $ FlatMapInternal (pure . fmap encode . f . decode)) : getPlan cont
 getPlan Identity = []
+getPlan (Partition f cont) = PartitionInternal (f . decode) : getPlan cont
+getPlan (Fold f initValue cont) = FoldInternal
+  (\(acc, v) -> encode $ f (decode acc) (decode v)) (encode initValue) : getPlan cont
 
 runJobManager ::
      (Binary a, Typeable a, Show a)
@@ -145,34 +156,38 @@ startTaskManager' = do
 
 type ProcessIdMap = MapContainer.Map Int [ProcessId]
 
+
+type OperatorsToRun = [Int]
+
+type RemoteTaskManagers = [ProcessId]
 data TaskManagerRunPlan =
-  TaskManagerRunPlan [Int]
+  TaskManagerRunPlan OperatorsToRun
                      [(Int, [ProcessId])]
 
 newtype TaskId =
   TaskId Int
-  deriving (Generic)
+  deriving (Generic, Show)
 
 instance Binary TaskId
 
 runTaskId :: TaskId -> Int
 runTaskId (TaskId i) = i
 
-type IndexedPlan = [(Int, DataStreamInternal)]
+type IndexedPlan = [(Int, DataStreamOperationInternal)]
 
 getIndexedPlan :: DataStream a b -> IndexedPlan
 getIndexedPlan ds = zip [1 ..] (getPlan ds)
 
 getMergedIndexedPlan :: IndexedPlan -> [Int] -> IndexedPlan
 getMergedIndexedPlan indexedPlan ids =
-  filter (\(operatorId, _) -> operatorId `elem` ids) indexedPlan
+  filter (\(taskId, _) -> taskId `elem` ids) indexedPlan
 
 getMergedProcessIdMap ::
      [(Int, [ProcessId])] -> [(Int, [ProcessId])] -> ProcessIdMap
 getMergedProcessIdMap local remote =
   MapContainer.fromListWith (++) (local ++ remote)
 
-runTaskManager :: Binary a => TaskManagerRunPlan -> Pipeline a b -> Process ()
+runTaskManager :: (Binary a, Binary b, Show b) => TaskManagerRunPlan -> Pipeline a b -> Process ()
 runTaskManager (TaskManagerRunPlan ids processIds) (Pipeline source ds sink) = do
   let plans = getMergedIndexedPlan (getIndexedPlan ds) ids
   selfPid <- getSelfPid
@@ -181,8 +196,10 @@ runTaskManager (TaskManagerRunPlan ids processIds) (Pipeline source ds sink) = d
   nodes <-
     forM plans $ \(operatorId, ds') -> do
       processId <-
-        spawnLocal $
-        runTransformTask (TaskId operatorId) sendPort ds'
+        spawnLocal $ case ds' of
+          DSInternal ds'' -> runTransformTask (TaskId operatorId) sendPort ds''
+          PartitionInternal f -> runPartitionTask (TaskId operatorId) sendPort f
+          FoldInternal f initValue -> runFoldTask (TaskId operatorId) sendPort f initValue
       return (operatorId, [processId])
   sourceNode <-
     spawnLocal $ runSourceTask (TaskId 0) sendPort source
@@ -193,6 +210,7 @@ runTaskManager (TaskManagerRunPlan ids processIds) (Pipeline source ds sink) = d
           ((0, [sourceNode]) : (sinkNodeIndex, [sinkNode]) : nodes)
           processIds
   send communicationManagerPid allProcessIds
+  forM_ nodes (\(_, [nodePid]) -> send nodePid allProcessIds)
 
 runCommunicationManager :: ProcessId -> Process ()
 runCommunicationManager pid = do
@@ -207,15 +225,15 @@ runCommunicationManager pid = do
         case nextOperator of
           (Just (x:_)) -> send x (IntermediateResult value)
           _            -> return ()
-      PartitionResult{}  -> return ()
+      PartitionResult _ pid' value -> send pid' (IntermediateResult value)
 
-newtype PartitionBucket = ParitionBucket Int
+newtype PartitionBucket = PartitionBucket Int
   deriving (Generic)
 
 instance Binary PartitionBucket where
 
-data CommunicationManagerMessage = TaskResult TaskId LB.ByteString | PartitionResult TaskId PartitionBucket LB.ByteString
-  deriving (Generic)
+data CommunicationManagerMessage = TaskResult TaskId LB.ByteString | PartitionResult TaskId ProcessId LB.ByteString
+  deriving (Generic, Show)
 
 instance Binary CommunicationManagerMessage where
 
@@ -226,12 +244,29 @@ newtype IntermediateResult = IntermediateResult LB.ByteString
 
 instance Binary IntermediateResult where
 
-runPartitionTask :: Binary a => TaskId -> ProcessId -> (a ->  Int) -> Process ()
-runPartitionTask taskId pid f =
+runFoldTask :: TaskId -> CommunicationManagerPort -> ((LB.ByteString, LB.ByteString) -> LB.ByteString) -> LB.ByteString -> Process ()
+runFoldTask taskId sendPort f initValue = do
+    prevResult <- liftIO $ newIORef (initValue :: LB.ByteString)
+    forever $ do
+      (IntermediateResult value) <- expect :: Process IntermediateResult
+      prev <- liftIO $ readIORef prevResult
+      let res = f (prev, value)
+      liftIO $ writeIORef prevResult res
+      sendChan sendPort $ TaskResult taskId res
+
+runPartitionTask :: Binary a => TaskId -> CommunicationManagerPort -> (a ->  Int) -> Process ()
+runPartitionTask taskId sendPort f = do
+  processIdMap <- expect :: Process ProcessIdMap
+  let processesForTask = MapContainer.lookup (runTaskId taskId) processIdMap
   forever $ do
     (IntermediateResult value) <- expect :: Process IntermediateResult
     let decoded = decode value
-    send pid (PartitionResult taskId (ParitionBucket (f decoded)) value)
+    case processesForTask of 
+      Just pTasks -> do
+        let processIndex = f decoded `mod` length pTasks
+        let processId = pTasks !! processIndex
+        sendChan sendPort (PartitionResult taskId processId value)
+      Nothing -> return ()
 
 runTransformTask :: TaskId -> CommunicationManagerPort -> DataStreamInternal -> Process ()
 runTransformTask taskId sendPort ds =
@@ -242,15 +277,17 @@ runTransformTask taskId sendPort ds =
       Just res' -> forM_ res' (sendChan sendPort . TaskResult taskId)
       _         -> return ()
 
-runSinkTask :: Sink a -> Process ()
+runSinkTask :: (Binary a, Show a) => Sink a -> Process ()
 runSinkTask (SinkFile path _) =
   forever $ do
     (IntermediateResult value) <- expect :: Process IntermediateResult
     liftIO $ appendFile path (show value)
-runSinkTask (StdOut _) =
+runSinkTask (StdOut enc) =
   forever $ do
     (IntermediateResult value) <- expect :: Process IntermediateResult
-    liftIO $ print value
+    let decoded = decode value
+    _ <- return $ enc decoded
+    liftIO $ print decoded
 
 runSourceTask :: (Binary a) => TaskId -> CommunicationManagerPort -> Source a -> Process ()
 runSourceTask taskId sendPort (Collection xs) =
@@ -266,7 +303,7 @@ runSourceTask taskId sendPort (SourceKafkaTopic KafkaConsumerConfig { topicName 
                                                                , brokerHost = brokerHost'
                                                                , brokerPort = brokerPort'
                                                                , consumerGroup = consumerGroup'
-                                                               } _) = do
+                                                               } dec) = do
   consumer <-
     liftIO $
     newConsumer
@@ -281,4 +318,4 @@ runSourceTask taskId sendPort (SourceKafkaTopic KafkaConsumerConfig { topicName 
               case value of
                 Right ConsumerRecord {crValue = Just value'} -> value'
                 _                                            -> B.empty
-        sendChan sendPort $ TaskResult taskId (encode value'')
+        sendChan sendPort $ TaskResult taskId (encode $ dec $ LB.fromStrict value'')

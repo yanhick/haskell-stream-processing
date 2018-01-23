@@ -24,7 +24,9 @@ data StreamData
   | Goodbye String
   deriving (Typeable, Generic, Show)
 
-instance Binary StreamData
+instance Binary StreamData  where
+  
+
 
 data OutputStreamData
   = Hello' Int
@@ -37,8 +39,8 @@ iToO :: StreamData -> OutputStreamData
 iToO (Hello i)   = Hello' i
 iToO (Goodbye s) = Goodbye' s
 
-dataStream :: DataStream StreamData OutputStreamData
-dataStream = Map iToO Identity
+dataStream :: DataStream StreamData Int
+dataStream = Map iToO $ Map (const 1) $ Fold (+) 0 Identity
 
 kafkaConsumerConfig :: KafkaConsumerConfig
 kafkaConsumerConfig =
@@ -50,26 +52,16 @@ kafkaConsumerConfig =
   }
 
 source :: Source StreamData
-source = SourceKafkaTopic kafkaConsumerConfig decode
+source = SourceKafkaTopic kafkaConsumerConfig (const $ Hello 2)
 
-sink :: Sink OutputStreamData
+sink :: Sink Int
 sink = StdOut $ B.concat . BL.toChunks . encode
 
-pipeline :: Pipeline StreamData OutputStreamData
+pipeline :: Pipeline StreamData Int
 pipeline = Pipeline source dataStream sink
 
 startTaskManager :: [NodeId] -> Process ()
-startTaskManager _ = runTaskManager (TaskManagerRunPlan [1] []) pipeline
-
-doubleInt :: Int -> Int
-doubleInt i = i * 2
-
-doubleCl :: StreamData -> Int
-doubleCl (Hello a)   = a * 2
-doubleCl (Goodbye _) = 0
-
-numToZero :: Int -> [String]
-numToZero n = fmap show [0 .. n]
+startTaskManager _ = runTaskManager (TaskManagerRunPlan [1, 2, 3] []) pipeline
 
 remotable ['startTaskManager]
 
