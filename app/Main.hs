@@ -12,10 +12,11 @@ import           Control.Distributed.Process.Backend.SimpleLocalnet
 import           Control.Distributed.Process.Closure
 import           Control.Distributed.Process.Node                   (initRemoteTable)
 import           Data.Binary
-import qualified Data.ByteString                                    as B
-import qualified Data.ByteString.Lazy                               as BL
 import           Data.Typeable
-import           DataStream
+import           JobManager
+import           TaskManager
+import           Operation
+import           Pipeline
 import           GHC.Generics
 import           System.Environment                                 (getArgs)
 
@@ -39,7 +40,7 @@ iToO :: StreamData -> OutputStreamData
 iToO (Hello i)   = Hello' i
 iToO (Goodbye s) = Goodbye' s
 
-dataStream :: DataStream StreamData Int
+dataStream :: Operation StreamData Int
 dataStream = Map iToO $ Map (const 1) $ Fold (+) 0 Identity
 
 kafkaConsumerConfig :: KafkaConsumerConfig
@@ -55,7 +56,7 @@ source :: Source StreamData
 source = SourceKafkaTopic kafkaConsumerConfig (const $ Hello 2)
 
 sink :: Sink Int
-sink = StdOut $ B.concat . BL.toChunks . encode
+sink = StdOut encode
 
 pipeline :: Pipeline StreamData Int
 pipeline = Pipeline source dataStream sink
