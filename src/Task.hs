@@ -1,19 +1,20 @@
 module Task where
 
-import Pipeline
-import Data.Monoid
-import Data.IORef
-import Data.Binary
-import Control.Distributed.Process
-import qualified Data.ByteString.Lazy as B
-import qualified Data.ByteString as BS
-import Data.Map as M
-import Control.Monad
-import CommunicationManager
-import Operation
-import Kafka.Consumer
+import           CommunicationManager
+import           Control.Distributed.Process
+import           Control.Monad
+import           Data.Binary
+import qualified Data.ByteString             as BS
+import qualified Data.ByteString.Lazy        as B
+import           Data.IORef
+import           Data.Map                    as M
+import           Data.Monoid
+import           Kafka.Consumer
+import           Operation
+import           Pipeline
 
-runParDoTask :: TaskId -> CommunicationManagerPort -> SerializingParDo -> Process ()
+runParDoTask ::
+     TaskId -> CommunicationManagerPort -> SerializingParDo -> Process ()
 runParDoTask taskId sendPort op =
   forever $ do
     (IntermediateResult value) <- expect :: Process IntermediateResult
@@ -22,24 +23,30 @@ runParDoTask taskId sendPort op =
       Just res' -> forM_ res' (sendChan sendPort . TaskResult taskId)
       _         -> return ()
 
-runFoldTask :: TaskId -> CommunicationManagerPort -> ((B.ByteString, B.ByteString) -> B.ByteString) -> B.ByteString -> Process ()
+runFoldTask ::
+     TaskId
+  -> CommunicationManagerPort
+  -> ((B.ByteString, B.ByteString) -> B.ByteString)
+  -> B.ByteString
+  -> Process ()
 runFoldTask taskId sendPort f initValue = do
-    prevResult <- liftIO $ newIORef (initValue :: B.ByteString)
-    forever $ do
-      (IntermediateResult value) <- expect :: Process IntermediateResult
-      prev <- liftIO $ readIORef prevResult
-      let res = f (prev, value)
-      liftIO $ writeIORef prevResult res
-      sendChan sendPort $ TaskResult taskId res
+  prevResult <- liftIO $ newIORef (initValue :: B.ByteString)
+  forever $ do
+    (IntermediateResult value) <- expect :: Process IntermediateResult
+    prev <- liftIO $ readIORef prevResult
+    let res = f (prev, value)
+    liftIO $ writeIORef prevResult res
+    sendChan sendPort $ TaskResult taskId res
 
-runPartitionTask :: Binary a => TaskId -> CommunicationManagerPort -> (a ->  Int) -> Process ()
+runPartitionTask ::
+     Binary a => TaskId -> CommunicationManagerPort -> (a -> Int) -> Process ()
 runPartitionTask taskId sendPort f = do
   processIdMap <- expect :: Process ProcessIdMap
   let processesForTask = M.lookup (runTaskId taskId) processIdMap
   forever $ do
     (IntermediateResult value) <- expect :: Process IntermediateResult
     let decoded = decode value
-    case processesForTask of 
+    case processesForTask of
       Just pTasks -> do
         let processIndex = f decoded `mod` length pTasks
         let processId = pTasks !! processIndex
@@ -69,7 +76,8 @@ consumerProps kafkaBroker' consumerGroup' =
 consumerSub :: String -> Subscription
 consumerSub topicName' = topics [TopicName topicName'] <> offsetReset Earliest
 
-runSourceTask :: (Binary a) => TaskId -> CommunicationManagerPort -> Source a -> Process ()
+runSourceTask ::
+     (Binary a) => TaskId -> CommunicationManagerPort -> Source a -> Process ()
 runSourceTask taskId sendPort (Collection xs) =
   forM_ xs (sendChan sendPort . TaskResult taskId . encode)
 runSourceTask taskId sendPort (SourceFile path _) = do
@@ -80,10 +88,10 @@ runSourceTask taskId sendPort (StdIn _) =
     line <- liftIO getLine
     sendChan sendPort $ TaskResult taskId (encode line)
 runSourceTask taskId sendPort (SourceKafkaTopic KafkaConsumerConfig { topicName = topicName'
-                                                               , brokerHost = brokerHost'
-                                                               , brokerPort = brokerPort'
-                                                               , consumerGroup = consumerGroup'
-                                                               } dec) = do
+                                                                    , brokerHost = brokerHost'
+                                                                    , brokerPort = brokerPort'
+                                                                    , consumerGroup = consumerGroup'
+                                                                    } dec) = do
   consumer <-
     liftIO $
     newConsumer
@@ -98,4 +106,5 @@ runSourceTask taskId sendPort (SourceKafkaTopic KafkaConsumerConfig { topicName 
               case value of
                 Right ConsumerRecord {crValue = Just value'} -> value'
                 _                                            -> BS.empty
-        sendChan sendPort $ TaskResult taskId (encode $ dec $ B.fromStrict value'')
+        sendChan sendPort $
+          TaskResult taskId (encode $ dec $ B.fromStrict value'')

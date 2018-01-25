@@ -1,13 +1,14 @@
 module JobManager where
-import Control.Distributed.Process
+
+import           Control.Distributed.Process
 import           Control.Distributed.Process.Backend.SimpleLocalnet
-import Pipeline
-import Data.Binary
-import           Data.Typeable
 import           Control.Distributed.Process.Node                   (localNodeId,
                                                                      runProcess)
-import Control.Monad
+import           Control.Monad
+import           Data.Binary
 import           Data.List
+import           Data.Typeable
+import           Pipeline
 
 runJobManager ::
      (Binary a, Typeable a, Show a)

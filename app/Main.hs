@@ -13,21 +13,19 @@ import           Control.Distributed.Process.Closure
 import           Control.Distributed.Process.Node                   (initRemoteTable)
 import           Data.Binary
 import           Data.Typeable
+import           GHC.Generics
 import           JobManager
-import           TaskManager
 import           Operation
 import           Pipeline
-import           GHC.Generics
 import           System.Environment                                 (getArgs)
+import           TaskManager
 
 data StreamData
   = Hello Int
   | Goodbye String
   deriving (Typeable, Generic, Show)
 
-instance Binary StreamData  where
-  
-
+instance Binary StreamData
 
 data OutputStreamData
   = Hello' Int

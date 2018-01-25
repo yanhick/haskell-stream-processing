@@ -1,7 +1,8 @@
 module Pipeline where
-import Data.ByteString.Lazy
-import Data.Text
-import Operation
+
+import           Data.ByteString.Lazy
+import           Data.Text
+import           Operation
 
 data KafkaConsumerConfig = KafkaConsumerConfig
   { topicName     :: String
@@ -18,8 +19,9 @@ data Source a
   | SourceKafkaTopic KafkaConsumerConfig
                      (ByteString -> a)
 
-data Sink a 
-  = SinkFile FilePath (a -> ByteString)
+data Sink a
+  = SinkFile FilePath
+             (a -> ByteString)
   | StdOut (a -> ByteString)
 
 data Pipeline a b =
