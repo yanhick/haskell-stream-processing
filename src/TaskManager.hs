@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 module TaskManager where
 
 import           CommunicationManager
@@ -20,29 +21,31 @@ runTaskManager ::
   => TaskManagerRunPlan
   -> Pipeline a b
   -> Process ()
-runTaskManager (TaskManagerRunPlan ids processIds) (Pipeline source ds sink) = do
-  let plans = getMergedIndexedPlan (getIndexedPlan ds) ids
+runTaskManager (TaskManagerRunPlan ids processIds) pipeline = do
+  let plans = getMergedIndexedPlan (getIndexedPlan pipeline) ids
   selfPid <- getSelfPid
   communicationManagerPid <- spawnLocal $ runCommunicationManager selfPid
   sendPort <- expect :: Process CommunicationManagerPort
-  nodes <-
-    forM plans $ \(operatorId, ds') -> do
-      processId <-
-        spawnLocal $
-        case ds' of
-          SerializingParDo ds'' ->
-            runParDoTask (TaskId operatorId) sendPort ds''
+  nodes <- forM plans (startOperator sendPort)
+  let allProcessIds = getMergedProcessIdMap nodes processIds
+  liftIO $ print allProcessIds
+  send communicationManagerPid allProcessIds
+  forM_ nodes (\(_, [nodePid]) -> send nodePid allProcessIds)
+
+startOperator :: (Binary a, Binary b, Show b) => CommunicationManagerPort -> RunnableOperator a b -> Process (Int, [ProcessId])
+startOperator sendPort RunnableOperator { operatorId = OperatorId operatorId, operator } =  do
+    processId <- spawnLocal $ case operator of
+      SinkOperator sink -> runSinkTask sink
+      SourceOperator source -> runSourceTask (TaskId operatorId) sendPort source
+      TransformationOperator transformationOperator -> startTransformationOperator operatorId transformationOperator sendPort
+    return (operatorId, [processId])
+
+startTransformationOperator :: Int -> SerializingOperation -> CommunicationManagerPort -> Process ()
+startTransformationOperator operatorId operation sendPort = 
+        case operation of
+          SerializingParDo operation' ->
+            runParDoTask (TaskId operatorId) sendPort operation'
           SerializingPartition f ->
             runPartitionTask (TaskId operatorId) sendPort f
           SerializingFold f initValue ->
             runFoldTask (TaskId operatorId) sendPort f initValue
-      return (operatorId, [processId])
-  sourceNode <- spawnLocal $ runSourceTask (TaskId 0) sendPort source
-  sinkNode <- spawnLocal $ runSinkTask sink
-  let sinkNodeIndex = length (getIndexedPlan ds) + 1
-  let allProcessIds =
-        getMergedProcessIdMap
-          ((0, [sourceNode]) : (sinkNodeIndex, [sinkNode]) : nodes)
-          processIds
-  send communicationManagerPid allProcessIds
-  forM_ nodes (\(_, [nodePid]) -> send nodePid allProcessIds)

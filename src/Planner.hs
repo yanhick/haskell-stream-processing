@@ -3,24 +3,35 @@ module Planner where
 import           Operation
 import           Pipeline
 
-data RunnableTask a b
-  = OperationTask SerializingOperation
-  | SourceTask (Source a)
-  | SinkTask (Sink b)
+newtype OperatorId =
+  OperatorId Int
 
-type IndexedPlan = [(Int, SerializingOperation)]
+data Operator a b
+  = TransformationOperator SerializingOperation
+  | SourceOperator (Source a)
+  | SinkOperator (Sink b)
 
-type IndexedPlan' a b = [(Int, RunnableTask a b)]
+data RunnableOperator a b = RunnableOperator
+  { operatorId :: OperatorId
+  , operator   :: Operator a b
+  }
 
-getIndexedPlan' :: Pipeline a b -> IndexedPlan' a b
-getIndexedPlan' (Pipeline source operation sink) =
-  zip [0 ..] $
-  SourceTask source :
-  (OperationTask <$> getSerializingOperations operation) ++ [SinkTask sink]
+type IndexedPlan a b = [RunnableOperator a b]
 
-getIndexedPlan :: Operation a b -> IndexedPlan
-getIndexedPlan operation = zip [1 ..] (getSerializingOperations operation)
+getIndexedPlan :: Pipeline a b -> IndexedPlan a b
+getIndexedPlan (Pipeline source operation sink) =
+  let operators =
+        zip [0 ..] $
+        SourceOperator source :
+        (TransformationOperator <$> getSerializingOperations operation) ++
+        [SinkOperator sink]
+  in fmap
+       (\(opId, op) ->
+          RunnableOperator {operator = op, operatorId = OperatorId opId})
+       operators
 
-getMergedIndexedPlan :: IndexedPlan -> [Int] -> IndexedPlan
+getMergedIndexedPlan :: IndexedPlan a b -> [Int] -> IndexedPlan a b
 getMergedIndexedPlan indexedPlan ids =
-  filter (\(taskId, _) -> taskId `elem` ids) indexedPlan
+  filter
+    (\RunnableOperator {operatorId = OperatorId opId} -> opId `elem` ids)
+    indexedPlan

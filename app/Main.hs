@@ -60,7 +60,7 @@ pipeline :: Pipeline StreamData Int
 pipeline = Pipeline source dataStream sink
 
 startTaskManager :: [NodeId] -> Process ()
-startTaskManager _ = runTaskManager (TaskManagerRunPlan [1, 2, 3] []) pipeline
+startTaskManager _ = runTaskManager (TaskManagerRunPlan [0, 1, 2, 3, 4] []) pipeline
 
 remotable ['startTaskManager]
 
