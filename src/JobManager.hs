@@ -9,15 +9,20 @@ import           Data.Binary
 import           Data.List
 import           Data.Typeable
 import           Pipeline
+import TaskManager
+import Planner
 
 runJobManager ::
      (Binary a, Typeable a, Show a)
   => Backend
   -> Pipeline a b
-  -> ([NodeId] -> Closure (Process ()))
+  -> (TaskManagerRunPlan -> Closure (Process ()))
   -> IO ()
-runJobManager backend _ start = do
+runJobManager backend pipeline start = do
   node <- newLocalNode backend
   nodes <- findPeers backend 1000000
   let peers = delete (localNodeId node) nodes
-  runProcess node $ forM_ peers $ \peer -> spawn peer (start peers)
+  runProcess node $ forM_ peers $ \peer -> spawn peer (start (getTaskManagerRunPlan pipeline))
+
+getTaskManagerRunPlan :: Pipeline a b -> TaskManagerRunPlan
+getTaskManagerRunPlan pipeline = TaskManagerRunPlan (getOperatorIndices pipeline) []

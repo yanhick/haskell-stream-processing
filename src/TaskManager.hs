@@ -1,7 +1,9 @@
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE DeriveGeneric      #-}
 module TaskManager where
 
 import           CommunicationManager
+import           GHC.Generics
 import           Control.Distributed.Process
 import           Control.Monad
 import           Data.Binary
@@ -15,6 +17,9 @@ type OperatorsToRun = [Int]
 data TaskManagerRunPlan =
   TaskManagerRunPlan OperatorsToRun
                      [(Int, [ProcessId])]
+                     deriving Generic
+
+instance Binary TaskManagerRunPlan where
 
 runTaskManager ::
      (Binary a, Binary b, Show b)
@@ -28,7 +33,6 @@ runTaskManager (TaskManagerRunPlan ids processIds) pipeline = do
   sendPort <- expect :: Process CommunicationManagerPort
   nodes <- forM plans (startOperator sendPort)
   let allProcessIds = getMergedProcessIdMap nodes processIds
-  liftIO $ print allProcessIds
   send communicationManagerPid allProcessIds
   forM_ nodes (\(_, [nodePid]) -> send nodePid allProcessIds)
 

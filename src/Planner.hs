@@ -30,6 +30,9 @@ getIndexedPlan (Pipeline source operation sink) =
           RunnableOperator {operator = op, operatorId = OperatorId opId})
        operators
 
+getOperatorIndices :: Pipeline a b -> [Int]
+getOperatorIndices pipeline = fmap (\RunnableOperator { operatorId = OperatorId opId } -> opId) (getIndexedPlan pipeline)
+
 getMergedIndexedPlan :: IndexedPlan a b -> [Int] -> IndexedPlan a b
 getMergedIndexedPlan indexedPlan ids =
   filter
